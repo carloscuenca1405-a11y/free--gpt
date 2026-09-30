@@ -2,6 +2,7 @@ import json
 import os
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import requests
 from bs4 import BeautifulSoup
 from ddgs import DDGS
@@ -26,6 +27,25 @@ DEFAULT_MESSAGE = "Olá! Me dê as boas-vindas em uma frase."
 
 MAX_TOOL_ROUNDS = 5
 MAX_TOOL_OUTPUT = 12000
+TIMEZONE = ZoneInfo("America/Sao_Paulo")
+
+# Palavras que indicam que o usuário quer informação da internet
+SEARCH_HINTS = (
+    "pesquis", "busque", "buscar", "procure", "internet", "google", "site",
+    "hoje", "agora", "atual", "recente", "notícia", "noticia", "últim", "ultim",
+    "liturgia", "evangelho", "cotação", "cotacao", "previsão", "previsao",
+)
+# Frases que indicam que o modelo desistiu de pesquisar
+REFUSAL_HINTS = (
+    "não tenho acesso", "nao tenho acesso", "não consigo acessar", "nao consigo acessar",
+    "não posso acessar", "nao posso acessar", "não posso navegar", "não consigo navegar",
+    "tempo real", "recomendo consultar", "recomendo acessar", "sugiro consultar",
+    "sugiro acessar", "você pode consultar", "voce pode consultar", "consulte o site",
+)
+NUDGE_MESSAGE = (
+    "Você TEM acesso à internet. Não sugira sites: use agora a ferramenta pesquisar_web "
+    "(e ler_pagina se precisar) e responda com as informações encontradas."
+)
 
 app = FastAPI(title="Free GPT", description=WELCOME_MESSAGE)
 
@@ -74,10 +94,9 @@ def ler_pagina(url: str) -> str:
 
 
 def liturgia_diaria(data: str | None = None) -> dict:
-    params = {}
-    if data:
-        dia, mes, ano = data.split("/")
-        params = {"dia": dia, "mes": mes, "ano": ano}
+    data = data or datetime.now(TIMEZONE).strftime("%d/%m/%Y")
+    dia, mes, ano = data.split("/")
+    params = {"dia": dia, "mes": mes, "ano": ano}
     response = requests.get(LITURGIA_URL, params=params, timeout=20)
     response.raise_for_status()
     return response.json()
@@ -152,13 +171,26 @@ def run_tool(name: str, arguments: str) -> str:
 
 
 def system_prompt() -> str:
-    hoje = datetime.now().strftime("%d/%m/%Y %H:%M")
+    hoje = datetime.now(TIMEZONE).strftime("%d/%m/%Y %H:%M")
     return (
-        f"Você é o Free GPT, um assistente que responde em português. Agora é {hoje}. "
-        "Você tem acesso à internet pelas ferramentas disponíveis: use-as sempre que a pergunta "
-        "envolver informações atuais, notícias ou a liturgia do dia. Cite as fontes (links) "
-        "quando usar a pesquisa na web."
+        f"Você é o Free GPT, um assistente que responde em português. Agora é {hoje} "
+        "(horário de Brasília). Você TEM acesso à internet pelas ferramentas pesquisar_web, "
+        "ler_pagina e liturgia_diaria. Sempre que o usuário pedir uma pesquisa ou a pergunta "
+        "envolver fatos, pessoas, lugares, história, notícias ou informações atuais, use "
+        "pesquisar_web e, se os resumos forem curtos, ler_pagina nos melhores links. "
+        "Nunca diga que não tem acesso à internet e nunca responda apenas sugerindo sites: "
+        "leia as fontes e responda com o conteúdo encontrado, citando os links no final."
     )
+
+
+def wants_search(text: str) -> bool:
+    text = text.lower()
+    return any(hint in text for hint in SEARCH_HINTS)
+
+
+def looks_like_refusal(text: str) -> bool:
+    text = text.lower()
+    return any(hint in text for hint in REFUSAL_HINTS)
 
 
 # ---------- Rotas ----------
@@ -206,11 +238,23 @@ def send_message(body: MessageRequest):
         {"role": "user", "content": body.message},
     ]
 
+    used_tools = False
+    nudged = False
+    asked_search = wants_search(body.message)
+
     for _ in range(MAX_TOOL_ROUNDS):
         message = call_openrouter(api_key, messages)
         tool_calls = message.get("tool_calls")
         if not tool_calls:
-            return MessageResponse(reply=message.get("content") or "")
+            content = message.get("content") or ""
+            if not used_tools and not nudged and (asked_search or looks_like_refusal(content)):
+                nudged = True
+                messages.append({"role": "assistant", "content": content})
+                messages.append({"role": "user", "content": NUDGE_MESSAGE})
+                continue
+            return MessageResponse(reply=content)
+
+        used_tools = True
 
         messages.append({"role": "assistant", "content": message.get("content"), "tool_calls": tool_calls})
         for call in tool_calls:
