@@ -34,6 +34,7 @@ SEARCH_HINTS = (
     "pesquis", "busque", "buscar", "procure", "internet", "google", "site",
     "hoje", "agora", "atual", "recente", "notícia", "noticia", "últim", "ultim",
     "liturgia", "evangelho", "cotação", "cotacao", "previsão", "previsao",
+    "imagem", "imagens", "foto", "figura",
 )
 # Frases que indicam que o modelo desistiu de pesquisar
 REFUSAL_HINTS = (
@@ -44,7 +45,7 @@ REFUSAL_HINTS = (
 )
 NUDGE_MESSAGE = (
     "Você TEM acesso à internet. Não sugira sites: use agora a ferramenta pesquisar_web "
-    "(e ler_pagina se precisar) e responda com as informações encontradas."
+    "(ou buscar_imagens, se pedi imagens; e ler_pagina se precisar) e responda com o que encontrar."
 )
 
 app = FastAPI(title="Free GPT", description=WELCOME_MESSAGE)
@@ -79,6 +80,19 @@ def pesquisar_web(consulta: str, max_resultados: int = 5) -> list[dict]:
     ]
 
 
+def buscar_imagens(consulta: str, max_resultados: int = 4) -> list[dict]:
+    resultados = DDGS().images(consulta, region="br-pt", max_results=max_resultados)
+    return [
+        {
+            "titulo": r.get("title"),
+            "pagina": r.get("url"),
+            "markdown": f"[![{(r.get('title') or 'imagem').replace('[', '').replace(']', '')}]"
+            f"({(r.get('thumbnail') or '').replace('+', '%2B')})]({r.get('image')})",
+        }
+        for r in resultados
+    ]
+
+
 def ler_pagina(url: str) -> str:
     response = requests.get(
         url,
@@ -104,6 +118,7 @@ def liturgia_diaria(data: str | None = None) -> dict:
 
 TOOL_FUNCTIONS = {
     "pesquisar_web": pesquisar_web,
+    "buscar_imagens": buscar_imagens,
     "ler_pagina": ler_pagina,
     "liturgia_diaria": liturgia_diaria,
 }
@@ -119,6 +134,21 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "consulta": {"type": "string", "description": "Termos da pesquisa"},
+                },
+                "required": ["consulta"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_imagens",
+            "description": "Busca imagens/fotos na internet. Cada resultado traz um campo 'markdown' "
+            "pronto: copie-o exatamente na resposta para a imagem aparecer para o usuário.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "O que buscar"},
                 },
                 "required": ["consulta"],
             },
@@ -175,7 +205,9 @@ def system_prompt() -> str:
     return (
         f"Você é o Free GPT, um assistente que responde em português. Agora é {hoje} "
         "(horário de Brasília). Você TEM acesso à internet pelas ferramentas pesquisar_web, "
-        "ler_pagina e liturgia_diaria. Sempre que o usuário pedir uma pesquisa ou a pergunta "
+        "buscar_imagens, ler_pagina e liturgia_diaria. Quando o usuário pedir imagem, foto ou "
+        "figura, use buscar_imagens e coloque na resposta o campo 'markdown' de cada resultado, "
+        "sem alterar. Sempre que o usuário pedir uma pesquisa ou a pergunta "
         "envolver fatos, pessoas, lugares, história, notícias ou informações atuais, use "
         "pesquisar_web e, se os resumos forem curtos, ler_pagina nos melhores links. "
         "Nunca diga que não tem acesso à internet e nunca responda apenas sugerindo sites: "
